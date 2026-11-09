@@ -104,7 +104,7 @@ async function search(){
   box.innerHTML='';
   items.forEach(it=>{
     const d=document.createElement('div'); d.textContent=it.label;
-    d.onclick=()=>{saveLoc({name:it.city&&it.city!==it.name?it.name+' · '+it.city:it.name,lat:it.lat,lon:it.lon});box.innerHTML='';document.getElementById('searchBox').style.display='none';load();};
+    d.onclick=()=>{saveLoc({name:it.city&&it.city!==it.name?it.name+' · '+it.city:it.name,lat:it.lat,lon:it.lon,source:'manual'});box.innerHTML='';document.getElementById('searchBox').style.display='none';load();};
     box.appendChild(d);
   });
   if(!box.children.length)box.textContent='没有找到，换个名字试试（如"闵行区""人民广场""南京东路"）';
@@ -118,21 +118,28 @@ async function reverseName(lat,lon){ // 反查地名：坐标 → 区县/城市
     return second?main+' · '+second:main;
   }catch(e){return null;}
 }
-async function ipLocate(){ // IP 定位（城市级兜底）
+async function ipLocate(){ // IP 兜底定位（城市级）：仅当机器定位（GPS/系统定位）失败时使用
   try{const j=await (await fetch('https://ipwho.is/')).json();
     if(j&&j.success!==false&&isFinite(j.latitude))return {lat:+j.latitude.toFixed(4),lon:+j.longitude.toFixed(4)};}catch(e){}
   return null;
 }
-async function locate(){ // 📍按钮 & 首次打开共用：精确 GPS 定位 → IP 定位 → 默认北京
+let holdBanner=null; // locate 设、load 显示后清空
+async function locate(){ // 📍按钮 & 每次打开共用：①机器自带定位（GPS/系统定位）②IP 兜底 ③默认北京
   document.getElementById('placeName').textContent='定位中…';
-  let lat=null,lon=null;
+  let lat=null,lon=null,how='';
   try{
-    const p=await new Promise((res,rej)=>{if(!navigator.geolocation)rej();navigator.geolocation.getCurrentPosition(res,rej,{timeout:6000,maximumAge:300000});});
-    lat=+p.coords.latitude.toFixed(4);lon=+p.coords.longitude.toFixed(4);
+    const p=await new Promise((res,rej)=>{if(!navigator.geolocation)rej(new Error('no-geolocation'));navigator.geolocation.getCurrentPosition(res,rej,{timeout:8000,maximumAge:300000,enableHighAccuracy:true});});
+    lat=+p.coords.latitude.toFixed(4);lon=+p.coords.longitude.toFixed(4);how='gps';
   }catch(e){}
-  if(lat==null){const ip=await ipLocate(); if(ip){lat=ip.lat;lon=ip.lon;}}
-  if(lat==null){saveLoc(DEFAULT);}
-  else{const name=(await reverseName(lat,lon))||'我的位置';saveLoc({name,lat,lon});}
+  if(lat==null){const ip=await ipLocate(); if(ip){lat=ip.lat;lon=ip.lon;how='ip';}}
+  if(lat!=null){
+    const name=(await reverseName(lat,lon))||'我的位置';
+    saveLoc({name,lat,lon,source:'auto'});
+    if(how==='ip')holdBanner='⚠️ 机器定位不可用（未授权或系统定位关闭），已用 IP 兜底定位（仅城市级）。允许定位权限后点「📍定位」可精确定位。';
+  }else{
+    saveLoc({...DEFAULT,source:'auto'});
+    holdBanner='⚠️ 定位失败：请允许浏览器的定位权限（系统设置的位置服务也需开启）。当前显示默认城市，可点「换城市」手动选。';
+  }
   load();
 }
 function fmt(t){const d=new Date(t);return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');}
@@ -166,13 +173,15 @@ function render(slots,src){
 }
 async function load(){
   if(!loc){
-    const saved=localStorage.getItem(KEY);
-    if(saved){loc=JSON.parse(saved);}
-    else{await locate();return;} // locate 会设置 loc 并自行调 load
+    let saved=null; try{saved=JSON.parse(localStorage.getItem(KEY));}catch(e){}
+    if(saved&&saved.source==='manual'){loc=saved;} // 手动选的城市尊重用户，不自动改
+    else{await locate();return;} // 自动定位来的位置（或无记录）：每次打开都重新定位，跟着人走
   }
   document.getElementById('placeName').textContent=loc.name;
   document.getElementById('vMain').textContent='正在获取当前时刻的降水预报…';
-  document.getElementById('banner').style.display='none';
+  const b0=document.getElementById('banner');
+  if(holdBanner){b0.textContent=holdBanner;b0.style.display='block';holdBanner=null;} // 显示定位提示（IP 兜底/失败）
+  else b0.style.display='none';
   try{
     const u=`https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&minutely_15=precipitation,precipitation_probability&forecast_days=1&timezone=auto`;
     const j=await (await fetch(u)).json();
