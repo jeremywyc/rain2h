@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>未来两小时降雨与温度 · 我所在位置</title>
+<style>
+  :root { --bg:#0f172a; --card:#1e293b; --text:#f1f5f9; --sub:#94a3b8; --ok:#22c55e; --warn:#f59e0b; --rain:#3b82f6; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:"Microsoft YaHei",system-ui,sans-serif; min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:24px 16px; }
+  .wrap { width:100%; max-width:680px; }
+  .banner { display:none; background:#78350f; color:#fde68a; border-radius:10px; padding:8px 14px; font-size:14px; margin-bottom:12px; }
+  .banner.show { display:block; }
+  .loc { text-align:center; color:var(--sub); font-size:15px; margin-bottom:4px; }
+  .loc b { color:var(--text); font-size:17px; }
+  .stamp { text-align:center; color:var(--sub); font-size:12px; margin-bottom:18px; }
+  .verdict { background:var(--card); border-radius:16px; padding:26px 20px; text-align:center; margin-bottom:14px; box-shadow:0 4px 20px rgba(0,0,0,.3); }
+  .verdict .icon { font-size:56px; line-height:1; }
+  .verdict .main { font-size:30px; font-weight:700; margin-top:10px; }
+  .verdict .sub { font-size:16px; color:var(--sub); margin-top:8px; }
+  .temp { background:var(--card); border-radius:16px; padding:18px 20px; margin-bottom:14px; }
+  .temp .row { display:flex; justify-content:space-between; align-items:baseline; }
+  .temp .now { font-size:44px; font-weight:700; }
+  .temp .trend { font-size:15px; color:var(--sub); }
+  .timeline { background:var(--card); border-radius:16px; padding:18px 16px 14px; margin-bottom:14px; }
+  .tl-title { font-size:13px; color:var(--sub); margin-bottom:12px; }
+  .tl-bar { display:flex; gap:3px; height:54px; align-items:flex-end; }
+  .tl-bar .slot { flex:1; border-radius:6px 6px 3px 3px; background:#334155; position:relative; display:flex; align-items:flex-start; justify-content:center; color:#cbd5e1; font-size:11px; padding-top:3px; min-height:20px; }
+  .tl-bar .slot .p { position:absolute; bottom:3px; font-size:10px; color:#bfdbfe; }
+  .tl-times { display:flex; gap:3px; margin-top:5px; }
+  .tl-times div { flex:1; text-align:center; font-size:10px; color:var(--sub); }
+  .ctrl { display:flex; gap:8px; margin-bottom:14px; }
+  .ctrl input { flex:1; background:var(--card); border:1px solid #334155; color:var(--text); border-radius:10px; padding:10px 14px; font-size:14px; outline:none; }
+  .ctrl button { background:#334155; color:var(--text); border:none; border-radius:10px; padding:10px 16px; font-size:14px; cursor:pointer; }
+  .ctrl button:hover { background:#475569; }
+  .status { text-align:center; color:var(--sub); font-size:14px; padding:30px 0; }
+  .legend { display:flex; gap:16px; justify-content:center; font-size:11px; color:var(--sub); margin-bottom:10px; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:4px; vertical-align:-1px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="banner" class="banner"></div>
+  <div class="loc" id="loc">📍 定位中…</div>
+  <div class="stamp" id="stamp"></div>
+
+  <div class="verdict" id="verdict" style="display:none">
+    <div class="icon" id="vIcon"></div>
+    <div class="main" id="vMain"></div>
+    <div class="sub" id="vSub"></div>
+  </div>
+
+  <div class="temp" id="temp" style="display:none">
+    <div class="row">
+      <div class="now" id="tNow"></div>
+      <div class="trend" id="tTrend"></div>
+    </div>
+  </div>
+
+  <div class="timeline" id="tl" style="display:none">
+    <div class="tl-title">未来两小时 · 每 15 分钟一档（蓝深浅 = 降雨强度，数字 = 温度℃ / 降水概率%）</div>
+    <div class="legend">
+      <span><i style="background:#334155"></i>无雨</span>
+      <span><i style="background:#60a5fa"></i>小雨</span>
+      <span><i style="background:#2563eb"></i>中雨</span>
+      <span><i style="background:#1e3a8a"></i>大雨</span>
+    </div>
+    <div class="tl-bar" id="tlBar"></div>
+    <div class="tl-times" id="tlTimes"></div>
+  </div>
+
+  <div class="ctrl">
+    <input id="cityInput" placeholder="手动指定城市/区县（如：闵行区）" list="cityList">
+    <datalist id="cityList"></datalist>
+    <button onclick="useManual()">切换</button>
+    <button onclick="backToAuto()">回到我的位置</button>
+  </div>
+
+  <div class="status" id="status">正在获取你的位置…</div>
+</div>
+
+<script>
+// ===== 定位链：系统定位(auto-device) → IP 兜底(auto-ip, 城市级横幅) → 手动搜索(manual, 保留不覆盖) =====
+let pendingBanner = null   // 占位转交：locate 阶段设置的提示不被 load 流程清掉（recipes 时序坑）
+const $ = id => document.getElementById(id)
+
+function showBanner(text) { pendingBanner = text }
+
+function fmtHM(isoLocal) {
+  const [h, m] = isoLocal.split('T')[1].split(':')
+  return `${h}:${m}`
+}
+async function locate() {
+  // manual 保留：用户手动选过的位置尊重保留，不自动改（recipes 前置条件规则）
+  const saved = localStorage.getItem('rain2h.manual')
+  if (saved) {
+    const m = JSON.parse(saved)
+    return { lat: m.lat, lon: m.lon, name: m.name, source: 'manual' }
+  }
+  // ① 机器自带定位优先（localhost 是安全上下文，允许）
+  const device = await new Promise(res => {
+    if (!navigator.geolocation) return res(null)
+    navigator.geolocation.getCurrentPosition(
+      p => res({ lat: p.coords.latitude, lon: p.coords.longitude, acc: p.coords.accuracy }),
+      () => res(null),
+      { timeout: 8000, maximumAge: 120000 }
+    )
+  })
+  if (device) return { lat: device.lat, lon: device.lon, name: null, source: 'device' }
+  // ② IP 兜底：城市级，横幅标注精度降级
+  try {
+    const r = await fetch('https://ipwho.is/')
+    const j = await r.json()
+    if (j && j.success) return { lat: j.latitude, lon: j.longitude, name: `${j.city}·${j.region}`, source: 'ip' }
+  } catch (e) {}
+  // ③ 全失败：提示手动
+  return null
+}
+
+async function reverseName(lat, lon) {
+  try {
+    const r = await fetch(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lon}&limit=1`)
+    const j = await r.json()
+    const f = j.features && j.features[0]
+    if (f) {
+      const p = f.properties
+      return [p.city || p.county || p.state, p.district].filter(Boolean).join('·') || p.name || null
+    }
+  } catch (e) {}
+  return null
+}
+
+async function loadWeather(pos) {
+  $('status').style.display = 'none'
+  $('loc').innerHTML = '📍 <b>' + (pos.name || (await reverseName(pos.lat, pos.lon)) || `${pos.lat.toFixed(3)}, ${pos.lon.toFixed(3)}`) + '</b>' +
+    (pos.source === 'ip' ? '（仅城市级·IP 定位）' : '') + (pos.source === 'manual' ? '（手动指定）' : '')
+  const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + pos.lat + '&longitude=' + pos.lon +
+    '&minutely_15=temperature_2m,precipitation,precipitation_probability,weather_code&current=temperature_2m,weather_code&forecast_days=1&timezone=auto'
+  const r = await fetch(url)
+  const j = await r.json()
+  const nowIso = j.current.time           // API 返回的当前时刻（对齐时区，避免本地/UTC 偏差）
+  const endIso = j.minutely_15.time.find(t => t > addMinIso(nowIso, 120)) // 往后推两小时
+  const idx = j.minutely_15.time.map((t, i) => ({ t, i })).filter(x => x.t >= nowIso && x.t <= endIso)
+  const slots = idx.map(x => ({
+    time: x.t, temp: j.minutely_15.temperature_2m[x.i], prec: j.minutely_15.precipitation[x.i],
+    prob: j.minutely_15.precipitation_probability[x.i], code: j.minutely_15.weather_code[x.i]
+  }))
+  render(j, slots)
+}
+
+function addMinIso(iso, min) {
+  const d = new Date(iso)
+  d.setMinutes(d.getMinutes() + min)
+  const p = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+function render(j, slots) {
+  // —— 降雨结论（不加戏：只陈述数据） ——
+  const rainSlots = slots.filter(s => s.prec > 0.1)
+  const probMax = Math.max(...slots.map(s => s.prob))
+  let vIcon, vMain, vSub
+  if (rainSlots.length) {
+    const start = fmtHM(rainSlots[0].time)
+    const peak = rainSlots.reduce((a, b) => b.prec > a.prec ? b : a)
+    vIcon = peak.prec >= 4 ? '🌧️' : peak.prec >= 1 ? '🌦️' : '🌦️'
+    vMain = '未来两小时会下雨'
+    vSub = `约 ${start} 开始 · 峰值 ${peak.prec.toFixed(1)} 毫米/15分钟 · 期间最大概率 ${probMax}%`
+  } else if (probMax >= 40) {
+    vIcon = '☁️'
+    vMain = '未来两小时可能下雨'
+    vSub = `当前无降雨数据，但最大降雨概率 ${probMax}%，建议备伞`
+  } else {
+    vIcon = '☀️'
+    vMain = '未来两小时不会下雨'
+    vSub = `两小时内最大降雨概率仅 ${probMax}%`
+  }
+  $('vIcon').textContent = vIcon; $('vMain').textContent = vMain; $('vSub').textContent = vSub
+  $('verdict').style.display = 'block'
+
+  // —— 温度 ——
+  const t0 = slots[0].temp, t1 = slots[slots.length - 1].temp
+  const tmin = Math.min(...slots.map(s => s.temp)), tmax = Math.max(...slots.map(s => s.temp))
+  const d = t1 - t0
+  $('tNow').textContent = j.current.temperature_2m.toFixed(1) + '°'
+  $('tTrend').innerHTML = `现在 → 两小时后 <b style="color:#f1f5f9">${t1.toFixed(1)}°</b>（${d > 0.3 ? '升 ' + d.toFixed(1) + '°' : d < -0.3 ? '降 ' + Math.abs(d).toFixed(1) + '°' : '基本持平'}）<br>区间 ${tmin.toFixed(1)}° ~ ${tmax.toFixed(1)}°`
+  $('temp').style.display = 'block'
+
+  // —— 时间轴 ——
+  $('tlBar').innerHTML = ''
+  $('tlTimes').innerHTML = ''
+  slots.forEach((s, i) => {
+    const div = document.createElement('div')
+    div.className = 'slot'
+    const p = s.prec
+    if (p > 4) div.style.background = '#1e3a8a'
+    else if (p > 1) div.style.background = '#2563eb'
+    else if (p > 0.1) div.style.background = '#60a5fa'
+    div.textContent = s.temp.toFixed(0) + '°'
+    if (p > 0.1) { const e = document.createElement('span'); e.className = 'p'; e.textContent = s.prob + '%'; div.appendChild(e) }
+    $('tlBar').appendChild(div)
+    const t = document.createElement('div')
+    t.textContent = i === 0 ? '现在' : (i % 2 === 0 ? fmtHM(s.time) : '')
+    $('tlTimes').appendChild(t)
+  })
+  $('tl').style.display = 'block'
+
+  // —— 时间戳 ——
+  const n = new Date()
+  const p2 = x => String(x).padStart(2, '0')
+  $('stamp').textContent = `数据截至 ${p2(n.getMonth()+1)}-${p2(n.getDate())} ${p2(n.getHours())}:${p2(n.getMinutes())} · Open-Meteo 15 分钟粒度 · 每 10 分钟自动刷新`
+}
+
+async function useManual() {
+  const q = $('cityInput').value.trim()
+  if (!q) { showBanner('请先输入城市或区县名'); return }
+  $('status').textContent = '搜索中…'; $('status').style.display = 'block'
+  try {
+    const r = await fetch('https://photon.komoot.io/api/?q=' + encodeURIComponent(q) + '&limit=1')
+    const j = await r.json()
+    const f = j.features && j.features[0]
+    if (!f) { showBanner('没找到这个地点，换个写法试试'); return }
+    const [lon, lat] = f.geometry.coordinates
+    const pp = f.properties
+    const name = [pp.city || pp.county || pp.state, pp.district].filter(Boolean).join('·') || pp.name || q
+    localStorage.setItem('rain2h.manual', JSON.stringify({ lat, lon, name }))
+    loadWeather({ lat, lon, name, source: 'manual' })
+  } catch (e) { showBanner('搜索服务暂时不可用，稍后再试') }
+}
+
+function backToAuto() {
+  localStorage.removeItem('rain2h.manual')
+  boot()
+}
+
+async function boot() {
+  pendingBanner = null
+  const pos = await locate()
+  // 时序：load 开头清横幅，locate 设置的提示用占位变量转交（recipes 时序坑）
+  if (pendingBanner) { $('banner').textContent = pendingBanner; $('banner').classList.add('show') }
+  else $('banner').classList.remove('show')
+  if (!pos) {
+    $('loc').textContent = '📍 无法自动定位'
+    $('status').innerHTML = '定位被拒绝或不可用——请在下方输入城市/区县手动指定，或在系统设置中开启定位权限后刷新。'
+    $('status').style.display = 'block'
+    if (pendingBanner) { $('banner').textContent = pendingBanner; $('banner').classList.add('show') }
+    return
+  }
+  try { await loadWeather(pos) } catch (e) {
+    $('status').textContent = '天气数据拉取失败（Open-Meteo 不可达？），10 分钟后自动重试'
+    $('status').style.display = 'block'
+  }
+}
+
+boot()
+setInterval(boot, 10 * 60 * 1000) // 每 10 分钟整链刷新（含重新定位）
+</script>
+</body>
+</html>
